@@ -1,0 +1,25 @@
+name: Halal Crypto Bot
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # كل ساعة
+  workflow_dispatch:       # عشان تقدر تشغله يدوياً كمان
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install libraries
+        run: |
+          pip install ccxt requests
+
+      - name: Run the bot
+        run: python bot.py
