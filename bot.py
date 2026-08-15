@@ -39,6 +39,11 @@ def calculate_rsi(closes, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+def calculate_sma(closes, period):
+    if len(closes) < period:
+        return closes[-1]
+    return sum(closes[-period:]) / period
+
 print(f"⏰ فحص السوق: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 for symbol in halal_coins:
@@ -47,9 +52,12 @@ for symbol in halal_coins:
         price = ticker['last']
         volume = ticker.get('quoteVolume', 0)
         
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=30)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=60)
         closes = [candle[4] for candle in ohlcv]
+        
         rsi = calculate_rsi(closes)
+        sma20 = calculate_sma(closes, 20)
+        sma50 = calculate_sma(closes, 50)
         
         volume_strength = "عادي"
         if volume > 500_000_000:
@@ -57,12 +65,29 @@ for symbol in halal_coins:
         elif volume > 100_000_000:
             volume_strength = "قوي"
         
-        print(f"{symbol} | ${price:.4f} | RSI: {rsi:.1f} | {volume_strength}")
+        trend = "صاعد" if sma20 > sma50 else "هابط"
         
-        if rsi < 35 and volume_strength in ["قوي", "قوي جداً"]:
+        print(f"{symbol} | ${price:.4f} | RSI: {rsi:.1f} | Trend: {trend} | {volume_strength}")
+        
+        if rsi < 35 and volume_strength in ["قوي", "قوي جداً"] and sma20 > sma50:
             tp = price * (1 + TAKE_PROFIT)
             sl = price * (1 - STOP_LOSS)
-            msg = f"""🟢 توصية شراء
+            msg = f"""🟢 توصية شراء قوية
+
+العملة: {symbol}
+السعر: ${price:.4f}
+RSI: {rsi:.1f}
+الاتجاه: {trend}
+الحجم: {volume_strength}
+
+هدف الربح: ${tp:.4f}
+وقف الخسارة: ${sl:.4f}"""
+            send_telegram(msg)
+            
+        elif rsi < 32 and volume_strength in ["قوي", "قوي جداً"]:
+            tp = price * (1 + TAKE_PROFIT)
+            sl = price * (1 - STOP_LOSS)
+            msg = f"""🟡 توصية شراء (بحذر)
 
 العملة: {symbol}
 السعر: ${price:.4f}
@@ -77,6 +102,6 @@ RSI: {rsi:.1f}
             send_telegram(f"🔴 تحذير: {symbol} تشبع شرائي (RSI: {rsi:.1f})")
             
     except Exception as e:
-        print(f"خطأ في {symbol}")
+        print(f"خطأ في {symbol}: {e}")
 
 print("تم الفحص")
