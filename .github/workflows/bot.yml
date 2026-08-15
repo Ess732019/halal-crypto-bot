@@ -2,7 +2,7 @@ name: Halal Crypto Bot
 
 on:
   schedule:
-    - cron: '0 * * * *'   # كل ساعة
+     - cron: '*/30 * * * *'   # كل 30 دقيقة
   workflow_dispatch:       # عشان تقدر تشغله يدوياً كمان
 
 jobs:
