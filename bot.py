@@ -22,16 +22,11 @@ def send_telegram(message):
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50
-    gains = []
-    losses = []
+    gains, losses = [], []
     for i in range(1, len(closes)):
         diff = closes[i] - closes[i-1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(diff))
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0:
@@ -53,26 +48,27 @@ for symbol in halal_coins:
         volume = ticker.get('quoteVolume', 0)
         
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=60)
-        closes = [candle[4] for candle in ohlcv]
+        closes = [c[4] for c in ohlcv]
         
         rsi = calculate_rsi(closes)
         sma20 = calculate_sma(closes, 20)
         sma50 = calculate_sma(closes, 50)
         
         volume_strength = "عادي"
-        if volume > 500_000_000:
+        if volume > 300_000_000:
             volume_strength = "قوي جداً"
-        elif volume > 100_000_000:
+        elif volume > 80_000_000:
             volume_strength = "قوي"
         
         trend = "صاعد" if sma20 > sma50 else "هابط"
         
-        print(f"{symbol} | ${price:.4f} | RSI: {rsi:.1f} | Trend: {trend} | {volume_strength}")
+        print(f"{symbol} | ${price:.4f} | RSI:{rsi:.1f} | {trend} | {volume_strength}")
         
-        if rsi < 35 and volume_strength in ["قوي", "قوي جداً"] and sma20 > sma50:
+        if rsi < 40 and volume_strength in ["قوي", "قوي جداً"]:
             tp = price * (1 + TAKE_PROFIT)
             sl = price * (1 - STOP_LOSS)
-            msg = f"""🟢 توصية شراء قوية
+            strength = "قوية" if rsi < 33 and sma20 > sma50 else "متوسطة"
+            msg = f"""🟢 توصية شراء ({strength})
 
 العملة: {symbol}
 السعر: ${price:.4f}
@@ -84,21 +80,7 @@ RSI: {rsi:.1f}
 وقف الخسارة: ${sl:.4f}"""
             send_telegram(msg)
             
-        elif rsi < 32 and volume_strength in ["قوي", "قوي جداً"]:
-            tp = price * (1 + TAKE_PROFIT)
-            sl = price * (1 - STOP_LOSS)
-            msg = f"""🟡 توصية شراء (بحذر)
-
-العملة: {symbol}
-السعر: ${price:.4f}
-RSI: {rsi:.1f}
-الحجم: {volume_strength}
-
-هدف الربح: ${tp:.4f}
-وقف الخسارة: ${sl:.4f}"""
-            send_telegram(msg)
-            
-        elif rsi > 72:
+        elif rsi > 70:
             send_telegram(f"🔴 تحذير: {symbol} تشبع شرائي (RSI: {rsi:.1f})")
             
     except Exception as e:
