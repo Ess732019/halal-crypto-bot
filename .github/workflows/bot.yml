@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install libraries
-        run: pip install requests
+        run: pip install ccxt requests
 
       - name: Run the bot
         env:
