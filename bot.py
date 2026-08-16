@@ -1,10 +1,10 @@
 import requests
 from datetime import datetime
+import os
 
-TELEGRAM_TOKEN = "8446358268:AAHltvnojSB7LrDWkmPiTuluXLOxBDduP1o"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = "7231266337"
 
-# العملات (معرفات CoinGecko)
 coins = {
     "bitcoin": "BTC",
     "ethereum": "ETH",
@@ -49,11 +49,10 @@ try:
         
         print(f"{symbol} | ${price:.4f} | تغير 24س: {change_24h:.2f}% | {volume_strength}")
         
-        # شروط مخففة
-        if change_24h <= -3 and volume_strength in ["قوي", "قوي جداً"]:
+        if change_24h <= -2.5 and volume_strength in ["قوي", "قوي جداً"]:
             tp = price * (1 + TAKE_PROFIT)
             sl = price * (1 - STOP_LOSS)
-            msg = f"""🟢 توصية شراء (بعد انخفاض)
+            msg = f"""🟢 توصية شراء
 
 العملة: {symbol}
 السعر: ${price:.4f}
@@ -64,11 +63,10 @@ try:
 وقف الخسارة: ${sl:.4f}"""
             send_telegram(msg)
             
-        elif change_24h >= 5 and volume_strength in ["قوي", "قوي جداً"]:
+        elif change_24h >= 4.5 and volume_strength in ["قوي", "قوي جداً"]:
             send_telegram(f"🔴 تحذير: {symbol} ارتفع بقوة ({change_24h:.2f}%) - راقب جني الأرباح")
             
 except Exception as e:
     print(f"خطأ عام: {e}")
-    send_telegram(f"⚠️ خطأ في البوت: {e}")
 
 print("تم الفحص")
