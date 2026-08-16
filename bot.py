@@ -1,12 +1,17 @@
-import ccxt
 import requests
 from datetime import datetime
 
 TELEGRAM_TOKEN = "8446358268:AAHltvnojSB7LrDWkmPiTuluXLOxBDduP1o"
 CHAT_ID = "7231266337"
 
-halal_coins = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
-exchange = ccxt.binance()
+# العملات (معرفات CoinGecko)
+coins = {
+    "bitcoin": "BTC",
+    "ethereum": "ETH",
+    "solana": "SOL",
+    "ripple": "XRP",
+    "cardano": "ADA"
+}
 
 TAKE_PROFIT = 0.04
 STOP_LOSS = 0.025
@@ -19,71 +24,51 @@ def send_telegram(message):
     except:
         pass
 
-def calculate_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return 50
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i-1]
-        gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def calculate_sma(closes, period):
-    if len(closes) < period:
-        return closes[-1]
-    return sum(closes[-period:]) / period
+def get_market_data():
+    ids = ",".join(coins.keys())
+    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={ids}&order=market_cap_desc&sparkline=false&price_change_percentage=24h"
+    response = requests.get(url, timeout=15)
+    return response.json()
 
 print(f"⏰ فحص السوق: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-for symbol in halal_coins:
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        price = ticker['last']
-        volume = ticker.get('quoteVolume', 0)
-        
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=60)
-        closes = [c[4] for c in ohlcv]
-        
-        rsi = calculate_rsi(closes)
-        sma20 = calculate_sma(closes, 20)
-        sma50 = calculate_sma(closes, 50)
+try:
+    data = get_market_data()
+    
+    for coin in data:
+        symbol = coins.get(coin["id"], coin["symbol"].upper())
+        price = coin["current_price"]
+        change_24h = coin.get("price_change_percentage_24h", 0)
+        volume = coin.get("total_volume", 0)
         
         volume_strength = "عادي"
-        if volume > 300_000_000:
+        if volume > 1_000_000_000:
             volume_strength = "قوي جداً"
-        elif volume > 80_000_000:
+        elif volume > 300_000_000:
             volume_strength = "قوي"
         
-        trend = "صاعد" if sma20 > sma50 else "هابط"
+        print(f"{symbol} | ${price:.4f} | تغير 24س: {change_24h:.2f}% | {volume_strength}")
         
-        print(f"{symbol} | ${price:.4f} | RSI:{rsi:.1f} | {trend} | {volume_strength}")
-        
-        if rsi < 40 and volume_strength in ["قوي", "قوي جداً"]:
+        # شروط مخففة
+        if change_24h <= -3 and volume_strength in ["قوي", "قوي جداً"]:
             tp = price * (1 + TAKE_PROFIT)
             sl = price * (1 - STOP_LOSS)
-            strength = "قوية" if rsi < 33 and sma20 > sma50 else "متوسطة"
-            msg = f"""🟢 توصية شراء ({strength})
+            msg = f"""🟢 توصية شراء (بعد انخفاض)
 
 العملة: {symbol}
 السعر: ${price:.4f}
-RSI: {rsi:.1f}
-الاتجاه: {trend}
+التغير 24 ساعة: {change_24h:.2f}%
 الحجم: {volume_strength}
 
 هدف الربح: ${tp:.4f}
 وقف الخسارة: ${sl:.4f}"""
             send_telegram(msg)
             
-        elif rsi > 70:
-            send_telegram(f"🔴 تحذير: {symbol} تشبع شرائي (RSI: {rsi:.1f})")
+        elif change_24h >= 5 and volume_strength in ["قوي", "قوي جداً"]:
+            send_telegram(f"🔴 تحذير: {symbol} ارتفع بقوة ({change_24h:.2f}%) - راقب جني الأرباح")
             
-    except Exception as e:
-        print(f"خطأ في {symbol}: {e}")
+except Exception as e:
+    print(f"خطأ عام: {e}")
+    send_telegram(f"⚠️ خطأ في البوت: {e}")
 
 print("تم الفحص")
