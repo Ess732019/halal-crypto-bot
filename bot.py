@@ -4,18 +4,9 @@ import os
 from datetime import datetime
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-WHALE_ALERT_API_KEY = os.environ.get("WHALE_ALERT_API_KEY")  # اختياري - لو فاضي هيتخطى فحص الحيتان
 CHAT_ID = "7231266337"
 
 halal_coins = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
-# رمز كل عملة على Whale Alert (blockchain symbol) — مطلوب لأن الـ API مش بياخد صيغة "BTC/USDT"
-whale_symbols = {
-    'BTC/USDT': 'btc', 'ETH/USDT': 'eth', 'SOL/USDT': 'sol',
-    'XRP/USDT': 'xrp', 'ADA/USDT': 'ada'
-}
-# الحد الأدنى لقيمة تحويل الحيتان (دولار) عشان تتحسب "نشاط ملحوظ"
-WHALE_MIN_VALUE_USD = 1_000_000
-
 exchange = ccxt.kraken()
 
 TAKE_PROFIT = 0.04
@@ -78,44 +69,6 @@ def calculate_bollinger(closes, period=20, num_std=2):
     return upper, sma, lower
 
 
-def check_whale_activity(symbol):
-    """
-    بيرجع (whale_detected: bool, note: str)
-    بيفحص آخر 10 دقايق، ولو مفيش API key أو حصل خطأ، بيرجع False بهدوء
-    (يعني باقي المؤشرات تفضل شغالة حتى لو فحص الحيتان فشل)
-    """
-    if not WHALE_ALERT_API_KEY:
-        return False, ""
-    try:
-        blockchain = whale_symbols.get(symbol)
-        if not blockchain:
-            return False, ""
-        url = "https://api.whale-alert.io/v1/transactions"
-        params = {
-            "api_key": WHALE_ALERT_API_KEY,
-            "min_value": WHALE_MIN_VALUE_USD,
-            "start": int(datetime.now().timestamp()) - 600,  # آخر 10 دقايق
-            "currency": blockchain
-        }
-        resp = requests.get(url, params=params, timeout=10)
-        data = resp.json()
-        txs = data.get("transactions", [])
-        if not txs:
-            return False, ""
-
-        to_exchange = sum(1 for t in txs if t.get("to", {}).get("owner_type") == "exchange")
-        from_exchange = sum(1 for t in txs if t.get("from", {}).get("owner_type") == "exchange")
-
-        if to_exchange > from_exchange:
-            return True, "تحويلات كبيرة لمنصات تداول (احتمال بيع)"
-        elif from_exchange > to_exchange:
-            return True, "تحويلات كبيرة برا منصات التداول (احتمال تجميع)"
-        else:
-            return True, "نشاط حيتان ملحوظ"
-    except Exception:
-        return False, ""
-
-
 def analyze_coin(symbol):
     ticker = exchange.fetch_ticker(symbol)
     price = ticker['last']
@@ -137,12 +90,10 @@ def analyze_coin(symbol):
         volume_strength = "قوي"
 
     trend = "صاعد" if ema20 > ema50 else "هابط"
-    whale_detected, whale_note = check_whale_activity(symbol)
 
-    # ---- Scoring System (0 to 6) ----
+    # ---- Scoring System (0 to 5) ----
     score = 0
     reasons = []
-    whale_warning = ""
 
     if rsi < 40:
         score += 1
@@ -160,20 +111,10 @@ def analyze_coin(symbol):
         score += 1
         reasons.append("حجم تداول قوي")
 
-    if whale_detected:
-        if "تجميع" in whale_note:
-            score += 1
-            reasons.append("تجميع من الحيتان")
-        elif "بيع" in whale_note:
-            whale_warning = "⚠️ رصدنا تحويلات حيتان لمنصات تداول (احتمال ضغط بيع) — خد بالك"
-        else:
-            reasons.append(whale_note)
-
     return {
         "symbol": symbol, "price": price, "rsi": rsi, "trend": trend,
         "macd_line": macd_line, "macd_signal": macd_signal,
-        "volume_strength": volume_strength, "score": score, "reasons": reasons,
-        "whale_warning": whale_warning
+        "volume_strength": volume_strength, "score": score, "reasons": reasons
     }
 
 
@@ -182,12 +123,10 @@ print(f"⏰ فحص السوق: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 for symbol in halal_coins:
     try:
         r = analyze_coin(symbol)
-        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | {r['trend']} | {r['volume_strength']} | نقاط: {r['score']}/6")
+        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | {r['trend']} | {r['volume_strength']} | نقاط: {r['score']}/5")
 
-        if r["score"] >= 5:
+        if r["score"] >= 4:
             strength = "قوية جداً"
-        elif r["score"] == 4:
-            strength = "قوية"
         elif r["score"] == 3:
             strength = "متوسطة"
         else:
@@ -196,15 +135,14 @@ for symbol in halal_coins:
         if strength:
             tp = r["price"] * (1 + TAKE_PROFIT)
             sl = r["price"] * (1 - STOP_LOSS)
-            whale_line = f"\n{r['whale_warning']}" if r["whale_warning"] else ""
-            msg = f"""🟢 توصية شراء ({strength}) — {r['score']}/6
+            msg = f"""🟢 توصية شراء ({strength}) — {r['score']}/5
 
 العملة: {r['symbol']}
 السعر: ${r['price']:.4f}
 RSI: {r['rsi']:.1f}
 الاتجاه: {r['trend']}
 الحجم: {r['volume_strength']}
-أسباب الإشارة: {', '.join(r['reasons'])}{whale_line}
+أسباب الإشارة: {', '.join(r['reasons'])}
 
 هدف الربح: ${tp:.4f}
 وقف الخسارة: ${sl:.4f}
