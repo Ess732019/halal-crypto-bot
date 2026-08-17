@@ -9,8 +9,8 @@ CHAT_ID = "7231266337"
 halal_coins = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
 exchange = ccxt.kraken()
 
-TAKE_PROFIT = 0.025   # 2.5%
-STOP_LOSS = 0.015     # 1.5%
+TAKE_PROFIT = 0.025
+STOP_LOSS = 0.015
 
 
 def send_telegram(message):
@@ -20,6 +20,17 @@ def send_telegram(message):
         requests.post(url, data=data, timeout=10)
     except:
         pass
+
+
+def get_fear_greed():
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+        data = r.json()["data"][0]
+        value = int(data["value"])
+        classification = data["value_classification"]
+        return value, classification
+    except:
+        return 50, "Neutral"
 
 
 def calculate_rsi(closes, period=14):
@@ -77,11 +88,10 @@ def calculate_adx(highs, lows, closes, period=14):
         down = lows[i-1] - lows[i]
         plus_dm.append(up if up > down and up > 0 else 0)
         minus_dm.append(down if down > up and down > 0 else 0)
-
     atr = sum(tr_list[-period:]) / period
-    plus_di = 100 * (sum(plus_dm[-period:]) / period) / atr if atr != 0 else 0
-    minus_di = 100 * (sum(minus_dm[-period:]) / period) / atr if atr != 0 else 0
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) != 0 else 0
+    plus_di = 100 * (sum(plus_dm[-period:]) / period) / atr if atr else 0
+    minus_di = 100 * (sum(minus_dm[-period:]) / period) / atr if atr else 0
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) else 0
     return dx
 
 
@@ -96,7 +106,7 @@ def get_btc_trend():
         return "غير محدد"
 
 
-def analyze_coin(symbol, btc_trend):
+def analyze_coin(symbol, btc_trend, fg_value):
     ticker = exchange.fetch_ticker(symbol)
     price = ticker['last']
     volume = ticker.get('quoteVolume', 0)
@@ -121,7 +131,6 @@ def analyze_coin(symbol, btc_trend):
 
     trend = "صاعد" if ema20 > ema50 else "هابط"
 
-    # ---- Scoring (0 to 5) ----
     score = 0
     reasons = []
 
@@ -141,35 +150,44 @@ def analyze_coin(symbol, btc_trend):
         score += 1
         reasons.append("حجم قوي")
 
+    # تعديل النقاط حسب مشاعر السوق
+    if fg_value <= 30:          # خوف شديد أو خوف
+        score += 1
+        reasons.append("مشاعر السوق خائفة (فرصة)")
+    elif fg_value >= 75:        # طمع شديد
+        score -= 1
+        reasons.append("مشاعر السوق طماعة (حذر)")
+
     return {
         "symbol": symbol, "price": price, "rsi": rsi, "trend": trend,
         "adx": adx, "volume_strength": volume_strength,
-        "score": score, "reasons": reasons, "btc_trend": btc_trend
+        "score": max(0, score), "reasons": reasons, "btc_trend": btc_trend
     }
 
 
 print(f"⏰ فحص السوق: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+fg_value, fg_class = get_fear_greed()
+print(f"Fear & Greed: {fg_value} ({fg_class})")
+
 btc_trend = get_btc_trend()
-print(f"اتجاه البيتكوين العام: {btc_trend}")
+print(f"اتجاه البيتكوين: {btc_trend}")
 
 for symbol in halal_coins:
     try:
-        r = analyze_coin(symbol, btc_trend)
-        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | ADX:{r['adx']:.1f} | {r['trend']} | نقاط:{r['score']}/5")
+        r = analyze_coin(symbol, btc_trend, fg_value)
+        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | ADX:{r['adx']:.1f} | نقاط:{r['score']}/6")
 
-        # فلتر 1: منع الشراء في ترند هابط
         if r["trend"] == "هابط":
             if r["score"] >= 3:
-                send_telegram(f"⏳ ترقب: {r['symbol']} فيه إشارات لكن الاتجاه هابط حالياً. ننتظر تحول صاعد.")
+                send_telegram(f"⏳ ترقب: {r['symbol']} إشارات موجودة لكن الاتجاه هابط.")
             continue
 
-        # فلتر 2: اتجاه البيتكوين
         if btc_trend == "هابط" and r["symbol"] != "BTC/USDT":
             if r["score"] >= 4:
-                send_telegram(f"⏳ ترقب: {r['symbol']} إشاراته جيدة لكن البيتكوين في اتجاه هابط.")
+                send_telegram(f"⏳ ترقب: {r['symbol']} جيد لكن البيتكوين هابط.")
             continue
 
-        # فلتر 3: ADX ضعيف (اتجاه ضعيف)
         if r["adx"] < 18 and r["score"] >= 3:
             send_telegram(f"⏳ ترقب: {r['symbol']} الاتجاه ضعيف (ADX منخفض).")
             continue
@@ -186,12 +204,13 @@ for symbol in halal_coins:
             tp = buy_price * (1 + TAKE_PROFIT)
             sl = buy_price * (1 - STOP_LOSS)
 
-            msg = f"""🟢 توصية شراء ({strength}) — {r['score']}/5
+            msg = f"""🟢 توصية شراء ({strength}) — {r['score']}/6
 
 العملة: {r['symbol']}
 RSI: {r['rsi']:.1f} | ADX: {r['adx']:.1f}
 الاتجاه: {r['trend']}
 الحجم: {r['volume_strength']}
+مشاعر السوق: {fg_value} ({fg_class})
 أسباب الإشارة: {', '.join(r['reasons'])}
 
 📥 اشتري عند: ${buy_price:.4f}
