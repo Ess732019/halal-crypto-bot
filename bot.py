@@ -9,9 +9,6 @@ CHAT_ID = "7231266337"
 halal_coins = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
 exchange = ccxt.kraken()
 
-TAKE_PROFIT = 0.025
-STOP_LOSS = 0.015
-
 
 def send_telegram(message):
     try:
@@ -26,9 +23,7 @@ def get_fear_greed():
     try:
         r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
         data = r.json()["data"][0]
-        value = int(data["value"])
-        classification = data["value_classification"]
-        return value, classification
+        return int(data["value"]), data["value_classification"]
     except:
         return 50, "Neutral"
 
@@ -45,8 +40,7 @@ def calculate_rsi(closes, period=14):
     avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0:
         return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    return 100 - (100 / (1 + avg_gain / avg_loss))
 
 
 def calculate_ema(closes, period):
@@ -74,7 +68,7 @@ def calculate_bollinger(closes, period=20, num_std=2):
     sma = sum(recent) / period
     variance = sum((p - sma) ** 2 for p in recent) / period
     std = variance ** 0.5
-    return sma + (num_std * std), sma, sma - (num_std * std)
+    return sma + num_std * std, sma, sma - num_std * std
 
 
 def calculate_adx(highs, lows, closes, period=14):
@@ -91,17 +85,24 @@ def calculate_adx(highs, lows, closes, period=14):
     atr = sum(tr_list[-period:]) / period
     plus_di = 100 * (sum(plus_dm[-period:]) / period) / atr if atr else 0
     minus_di = 100 * (sum(minus_dm[-period:]) / period) / atr if atr else 0
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) else 0
-    return dx
+    return 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) else 0
+
+
+def calculate_atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return closes[-1] * 0.02
+    tr_list = []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_list.append(tr)
+    return sum(tr_list[-period:]) / period
 
 
 def get_btc_trend():
     try:
         ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=50)
         closes = [c[4] for c in ohlcv]
-        ema20 = calculate_ema(closes, 20)
-        ema50 = calculate_ema(closes, 50)
-        return "صاعد" if ema20 > ema50 else "هابط"
+        return "صاعد" if calculate_ema(closes, 20) > calculate_ema(closes, 50) else "هابط"
     except:
         return "غير محدد"
 
@@ -122,6 +123,7 @@ def analyze_coin(symbol, btc_trend, fg_value):
     macd_line, macd_signal = calculate_macd(closes)
     bb_upper, bb_mid, bb_lower = calculate_bollinger(closes)
     adx = calculate_adx(highs, lows, closes)
+    atr = calculate_atr(highs, lows, closes)
 
     volume_strength = "عادي"
     if volume > 5_000_000:
@@ -150,18 +152,22 @@ def analyze_coin(symbol, btc_trend, fg_value):
         score += 1
         reasons.append("حجم قوي")
 
-    # تعديل النقاط حسب مشاعر السوق
-    if fg_value <= 30:          # خوف شديد أو خوف
+    if fg_value <= 30:
         score += 1
-        reasons.append("مشاعر السوق خائفة (فرصة)")
-    elif fg_value >= 75:        # طمع شديد
+        reasons.append("مشاعر خائفة (فرصة)")
+    elif fg_value >= 75:
         score -= 1
-        reasons.append("مشاعر السوق طماعة (حذر)")
+        reasons.append("مشاعر طماعة (حذر)")
+
+    # TP و SL بناءً على ATR
+    tp = price + (atr * 2.5)
+    sl = price - (atr * 1.5)
 
     return {
         "symbol": symbol, "price": price, "rsi": rsi, "trend": trend,
-        "adx": adx, "volume_strength": volume_strength,
-        "score": max(0, score), "reasons": reasons, "btc_trend": btc_trend
+        "adx": adx, "atr": atr, "volume_strength": volume_strength,
+        "score": max(0, score), "reasons": reasons,
+        "tp": tp, "sl": sl
     }
 
 
@@ -169,14 +175,13 @@ print(f"⏰ فحص السوق: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 fg_value, fg_class = get_fear_greed()
 print(f"Fear & Greed: {fg_value} ({fg_class})")
-
 btc_trend = get_btc_trend()
 print(f"اتجاه البيتكوين: {btc_trend}")
 
 for symbol in halal_coins:
     try:
         r = analyze_coin(symbol, btc_trend, fg_value)
-        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | ADX:{r['adx']:.1f} | نقاط:{r['score']}/6")
+        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | ATR:{r['atr']:.4f} | نقاط:{r['score']}")
 
         if r["trend"] == "هابط":
             if r["score"] >= 3:
@@ -200,22 +205,18 @@ for symbol in halal_coins:
             strength = None
 
         if strength:
-            buy_price = r["price"]
-            tp = buy_price * (1 + TAKE_PROFIT)
-            sl = buy_price * (1 - STOP_LOSS)
-
             msg = f"""🟢 توصية شراء ({strength}) — {r['score']}/6
 
 العملة: {r['symbol']}
-RSI: {r['rsi']:.1f} | ADX: {r['adx']:.1f}
+RSI: {r['rsi']:.1f} | ADX: {r['adx']:.1f} | ATR: {r['atr']:.4f}
 الاتجاه: {r['trend']}
 الحجم: {r['volume_strength']}
 مشاعر السوق: {fg_value} ({fg_class})
 أسباب الإشارة: {', '.join(r['reasons'])}
 
-📥 اشتري عند: ${buy_price:.4f}
-🎯 بيع عند: ${tp:.4f}
-🛑 وقف خسارة عند: ${sl:.4f}
+📥 اشتري عند: ${r['price']:.4f}
+🎯 بيع عند: ${r['tp']:.4f}
+🛑 وقف خسارة عند: ${r['sl']:.4f}
 
 ⚠️ توصية تحليلية آلية، مش نصيحة استثمارية."""
             send_telegram(msg)
