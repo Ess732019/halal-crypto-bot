@@ -9,8 +9,8 @@ CHAT_ID = "7231266337"
 halal_coins = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
 exchange = ccxt.kraken()
 
-TAKE_PROFIT = 0.04
-STOP_LOSS = 0.025
+TAKE_PROFIT = 0.025   # 2.5%
+STOP_LOSS = 0.015     # 1.5%
 
 
 def send_telegram(message):
@@ -52,9 +52,8 @@ def calculate_macd(closes):
     ema12 = calculate_ema(closes, 12)
     ema26 = calculate_ema(closes, 26)
     macd_line = ema12 - ema26
-    # Simplified signal line using last 9 MACD-like estimate
-    ema9_of_close = calculate_ema(closes[-9:], 9) if len(closes) >= 9 else macd_line
-    return macd_line, macd_line - (ema9_of_close - calculate_ema(closes, 26))
+    signal = calculate_ema(closes[-9:], 9) if len(closes) >= 9 else macd_line
+    return macd_line, signal
 
 
 def calculate_bollinger(closes, period=20, num_std=2):
@@ -64,24 +63,55 @@ def calculate_bollinger(closes, period=20, num_std=2):
     sma = sum(recent) / period
     variance = sum((p - sma) ** 2 for p in recent) / period
     std = variance ** 0.5
-    upper = sma + (num_std * std)
-    lower = sma - (num_std * std)
-    return upper, sma, lower
+    return sma + (num_std * std), sma, sma - (num_std * std)
 
 
-def analyze_coin(symbol):
+def calculate_adx(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return 20
+    tr_list, plus_dm, minus_dm = [], [], []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_list.append(tr)
+        up = highs[i] - highs[i-1]
+        down = lows[i-1] - lows[i]
+        plus_dm.append(up if up > down and up > 0 else 0)
+        minus_dm.append(down if down > up and down > 0 else 0)
+
+    atr = sum(tr_list[-period:]) / period
+    plus_di = 100 * (sum(plus_dm[-period:]) / period) / atr if atr != 0 else 0
+    minus_di = 100 * (sum(minus_dm[-period:]) / period) / atr if atr != 0 else 0
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) != 0 else 0
+    return dx
+
+
+def get_btc_trend():
+    try:
+        ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=50)
+        closes = [c[4] for c in ohlcv]
+        ema20 = calculate_ema(closes, 20)
+        ema50 = calculate_ema(closes, 50)
+        return "صاعد" if ema20 > ema50 else "هابط"
+    except:
+        return "غير محدد"
+
+
+def analyze_coin(symbol, btc_trend):
     ticker = exchange.fetch_ticker(symbol)
     price = ticker['last']
     volume = ticker.get('quoteVolume', 0)
 
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
     closes = [c[4] for c in ohlcv]
+    highs = [c[2] for c in ohlcv]
+    lows = [c[3] for c in ohlcv]
 
     rsi = calculate_rsi(closes)
     ema20 = calculate_ema(closes, 20)
     ema50 = calculate_ema(closes, 50)
     macd_line, macd_signal = calculate_macd(closes)
     bb_upper, bb_mid, bb_lower = calculate_bollinger(closes)
+    adx = calculate_adx(highs, lows, closes)
 
     volume_strength = "عادي"
     if volume > 5_000_000:
@@ -91,7 +121,7 @@ def analyze_coin(symbol):
 
     trend = "صاعد" if ema20 > ema50 else "هابط"
 
-    # ---- Scoring System (0 to 5) ----
+    # ---- Scoring (0 to 5) ----
     score = 0
     reasons = []
 
@@ -100,30 +130,49 @@ def analyze_coin(symbol):
         reasons.append("RSI منخفض")
     if trend == "صاعد":
         score += 1
-        reasons.append("اتجاه صاعد (EMA)")
+        reasons.append("اتجاه صاعد")
     if macd_line > macd_signal:
         score += 1
         reasons.append("MACD إيجابي")
-    if price <= bb_lower * 1.01:
+    if price <= bb_lower * 1.015:
         score += 1
-        reasons.append("قرب الحد السفلي لبولينجر")
+        reasons.append("قرب بولينجر السفلي")
     if volume_strength in ["قوي", "قوي جداً"]:
         score += 1
-        reasons.append("حجم تداول قوي")
+        reasons.append("حجم قوي")
 
     return {
         "symbol": symbol, "price": price, "rsi": rsi, "trend": trend,
-        "macd_line": macd_line, "macd_signal": macd_signal,
-        "volume_strength": volume_strength, "score": score, "reasons": reasons
+        "adx": adx, "volume_strength": volume_strength,
+        "score": score, "reasons": reasons, "btc_trend": btc_trend
     }
 
 
 print(f"⏰ فحص السوق: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+btc_trend = get_btc_trend()
+print(f"اتجاه البيتكوين العام: {btc_trend}")
 
 for symbol in halal_coins:
     try:
-        r = analyze_coin(symbol)
-        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | {r['trend']} | {r['volume_strength']} | نقاط: {r['score']}/5")
+        r = analyze_coin(symbol, btc_trend)
+        print(f"{r['symbol']} | ${r['price']:.4f} | RSI:{r['rsi']:.1f} | ADX:{r['adx']:.1f} | {r['trend']} | نقاط:{r['score']}/5")
+
+        # فلتر 1: منع الشراء في ترند هابط
+        if r["trend"] == "هابط":
+            if r["score"] >= 3:
+                send_telegram(f"⏳ ترقب: {r['symbol']} فيه إشارات لكن الاتجاه هابط حالياً. ننتظر تحول صاعد.")
+            continue
+
+        # فلتر 2: اتجاه البيتكوين
+        if btc_trend == "هابط" and r["symbol"] != "BTC/USDT":
+            if r["score"] >= 4:
+                send_telegram(f"⏳ ترقب: {r['symbol']} إشاراته جيدة لكن البيتكوين في اتجاه هابط.")
+            continue
+
+        # فلتر 3: ADX ضعيف (اتجاه ضعيف)
+        if r["adx"] < 18 and r["score"] >= 3:
+            send_telegram(f"⏳ ترقب: {r['symbol']} الاتجاه ضعيف (ADX منخفض).")
+            continue
 
         if r["score"] >= 4:
             strength = "قوية جداً"
@@ -133,21 +182,23 @@ for symbol in halal_coins:
             strength = None
 
         if strength:
-            tp = r["price"] * (1 + TAKE_PROFIT)
-            sl = r["price"] * (1 - STOP_LOSS)
+            buy_price = r["price"]
+            tp = buy_price * (1 + TAKE_PROFIT)
+            sl = buy_price * (1 - STOP_LOSS)
+
             msg = f"""🟢 توصية شراء ({strength}) — {r['score']}/5
 
 العملة: {r['symbol']}
-السعر: ${r['price']:.4f}
-RSI: {r['rsi']:.1f}
+RSI: {r['rsi']:.1f} | ADX: {r['adx']:.1f}
 الاتجاه: {r['trend']}
 الحجم: {r['volume_strength']}
 أسباب الإشارة: {', '.join(r['reasons'])}
 
-هدف الربح: ${tp:.4f}
-وقف الخسارة: ${sl:.4f}
+📥 اشتري عند: ${buy_price:.4f}
+🎯 بيع عند: ${tp:.4f}
+🛑 وقف خسارة عند: ${sl:.4f}
 
-⚠️ توصية تحليلية آلية، مش نصيحة استثمارية. راجع قرارك دايمًا."""
+⚠️ توصية تحليلية آلية، مش نصيحة استثمارية."""
             send_telegram(msg)
 
         elif r["rsi"] > 70:
