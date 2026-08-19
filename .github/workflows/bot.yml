@@ -19,7 +19,6 @@ jobs:
 
       - name: Install libraries
         run: pip install ccxt requests
-
       - name: Run the bot
         env:
            TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
