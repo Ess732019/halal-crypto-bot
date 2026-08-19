@@ -411,3 +411,4 @@ RSI: {r['rsi']:.1f} | الاتجاه: {r['trend']} | ADX: {r['adx']:.1f}
         print(f"خطأ في {symbol}: {e}")
 
 print("تم الفحص")
+
