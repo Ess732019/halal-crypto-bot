@@ -2,7 +2,7 @@ name: Halal Crypto Bot
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -19,8 +19,9 @@ jobs:
 
       - name: Install libraries
         run: pip install ccxt requests
+
       - name: Run the bot
         env:
-           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           GOOGLE_SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
         run: python bot.py
