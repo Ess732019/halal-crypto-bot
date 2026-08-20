@@ -8,7 +8,21 @@ GOOGLE_SCRIPT_URL = os.environ.get("GOOGLE_SCRIPT_URL")  # اختياري
 CHAT_ID = "7231266337"
 
 halal_coins = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
-exchange = ccxt.kraken()
+
+# تحسين 21: مصدر احتياطي — لو Kraken وقعت أو فيها مشكلة، نستخدم KuCoin بدل منها
+def get_exchange():
+    try:
+        ex = ccxt.kraken()
+        ex.fetch_ticker('BTC/USDT')  # اختبار سريع إن المنصة شغالة فعلاً
+        print("متصل بـ: Kraken")
+        return ex
+    except Exception as e:
+        print(f"⚠️ Kraken مش متاحة ({e}) — التحويل لـ KuCoin")
+        ex = ccxt.kucoin()
+        print("متصل بـ: KuCoin")
+        return ex
+
+exchange = get_exchange()
 
 COOLDOWN_HOURS = 6  # تحسين 16
 
@@ -166,29 +180,77 @@ def calculate_bollinger(closes, period=20, num_std=2):
 
 
 def calculate_adx(highs, lows, closes, period=14):
-    if len(closes) < period + 1:
-        return 20
-    tr_list, plus_dm, minus_dm = [], [], []
+    """
+    حساب ADX بمعادلة Wilder's Smoothing الصحيحة (المعادلة الأصلية)
+    بدل المتوسط البسيط اللي كان بيدّي أرقام غير واقعية (فوق 80-90)
+    """
+    if len(closes) < period * 2:
+        return 20  # مش كفاية بيانات، رقم افتراضي محايد
+
+    tr_list, plus_dm_list, minus_dm_list = [], [], []
     for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
         tr_list.append(tr)
-        up = highs[i] - highs[i - 1]
-        down = lows[i - 1] - lows[i]
-        plus_dm.append(up if up > down and up > 0 else 0)
-        minus_dm.append(down if down > up and down > 0 else 0)
-    atr = sum(tr_list[-period:]) / period
-    plus_di = 100 * (sum(plus_dm[-period:]) / period) / atr if atr else 0
-    minus_di = 100 * (sum(minus_dm[-period:]) / period) / atr if atr else 0
-    return 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) else 0
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm_list.append(up_move if (up_move > down_move and up_move > 0) else 0)
+        minus_dm_list.append(down_move if (down_move > up_move and down_move > 0) else 0)
+
+    # الخطوة 1: أول قيمة تمهيدية = متوسط بسيط لأول period
+    smoothed_tr = sum(tr_list[:period])
+    smoothed_plus_dm = sum(plus_dm_list[:period])
+    smoothed_minus_dm = sum(minus_dm_list[:period])
+
+    dx_list = []
+    for i in range(period, len(tr_list)):
+        # الخطوة 2: Wilder's Smoothing التراكمي (مش متوسط بسيط)
+        smoothed_tr = smoothed_tr - (smoothed_tr / period) + tr_list[i]
+        smoothed_plus_dm = smoothed_plus_dm - (smoothed_plus_dm / period) + plus_dm_list[i]
+        smoothed_minus_dm = smoothed_minus_dm - (smoothed_minus_dm / period) + minus_dm_list[i]
+
+        if smoothed_tr == 0:
+            continue
+        plus_di = 100 * (smoothed_plus_dm / smoothed_tr)
+        minus_di = 100 * (smoothed_minus_dm / smoothed_tr)
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            continue
+        dx = 100 * abs(plus_di - minus_di) / di_sum
+        dx_list.append(dx)
+
+    if not dx_list:
+        return 20
+
+    # الخطوة 3: ADX = متوسط Wilder's لآخر DX values (مش DX خام لفترة واحدة)
+    if len(dx_list) < period:
+        return sum(dx_list) / len(dx_list)
+
+    adx = sum(dx_list[:period]) / period
+    for dx in dx_list[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
 
 
 def calculate_atr(highs, lows, closes, period=14):
+    """حساب ATR بمعادلة Wilder's Smoothing (بدل المتوسط البسيط)"""
     if len(closes) < period + 1:
         return closes[-1] * 0.02
     tr_list = []
     for i in range(1, len(closes)):
-        tr_list.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
-    return sum(tr_list[-period:]) / period
+        tr_list.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        ))
+    # أول قيمة = متوسط بسيط، وبعدين Wilder's Smoothing تراكمي
+    atr = sum(tr_list[:period]) / period
+    for tr in tr_list[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
 
 
 def get_btc_trend():
@@ -356,6 +418,11 @@ for symbol in halal_coins:
             print(f"   ⏸️ متخطي {symbol} — قريب من حدث اقتصادي كبير")
             continue
 
+        # فلتر عاجل: تشبع شرائي (RSI > 70) — ممنوع الشراء تمامًا مهما كانت باقي النقاط
+        if r["rsi"] > 70:
+            send_telegram(f"🔴 تحذير: {r['symbol']} تشبع شرائي (RSI: {r['rsi']:.1f}) — لا توصية شراء رغم النقاط ({r['score']})")
+            continue
+
         # تحسين 10: فلتر اتجاه العملة (بنيوي، مش نقطة إضافية)
         if r["trend"] == "هابط":
             if r["score"] >= 3:
@@ -370,6 +437,21 @@ for symbol in halal_coins:
 
 ⚠️ رسالة ترقب فقط، مش توصية تنفيذ."""
                 send_telegram(watch_msg)
+            continue
+
+        # فلتر قوة الاتجاه (ADX ضعيف) — رسالة ترقب مفصّلة بدل التوصية المباشرة
+        if r["adx"] < 18 and r["score"] >= 3:
+            adx_watch_msg = f"""⏳ ترقب — {r['symbol']}
+
+السعر الحالي: ${r['price']:.4f}
+الاتجاه ضعيف حاليًا (ADX: {r['adx']:.1f}) — يعني السوق "عايم" من غير زخم واضح
+باقي المؤشرات كويسة: {', '.join(r['reasons'])}
+
+راقب لو ADX بدأ يرتفع فوق 20-25 في الفحوصات الجاية
+ده هيدل على إن الاتجاه بدأ ياخد قوة حقيقية، وقتها الفرصة تبقى أوثق
+
+⚠️ رسالة ترقب فقط، مش توصية تنفيذ."""
+            send_telegram(adx_watch_msg)
             continue
 
         # تحسين 14: عتبات نظام النقاط الموحّد
@@ -404,11 +486,7 @@ RSI: {r['rsi']:.1f} | الاتجاه: {r['trend']} | ADX: {r['adx']:.1f}
             send_telegram(msg)
             sheet_log_recommendation(r['symbol'], r['price'], r['tp'], r['sl'], r['score'], r['trend'], r['adx'], fg_value)
 
-        elif r["rsi"] > 70:
-            send_telegram(f"🔴 تحذير: {r['symbol']} تشبع شرائي (RSI: {r['rsi']:.1f})")
-
     except Exception as e:
         print(f"خطأ في {symbol}: {e}")
 
 print("تم الفحص")
-
