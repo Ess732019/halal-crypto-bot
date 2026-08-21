@@ -7,7 +7,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GOOGLE_SCRIPT_URL = os.environ.get("GOOGLE_SCRIPT_URL")  # اختياري
 CHAT_ID = "7231266337"
 
-halal_coins = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
+halal_coins = [
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT',
+    'LTC/USDT', 'BCH/USDT', 'LINK/USDT', 'DOT/USDT', 'AVAX/USDT'
+]
 
 # تحسين 21: مصدر احتياطي — لو Kraken وقعت أو فيها مشكلة، نستخدم KuCoin بدل منها
 def get_exchange():
@@ -80,16 +83,22 @@ def is_in_cooldown(symbol, last_times):
         return False
 
 
-def sheet_update_trade(trade_id, status, exit_price):
+def sheet_update_trade(trade_id, status, exit_price, retries=2):
+    """بيرجع True لو التحديث نجح فعليًا، False لو فشل بعد كل المحاولات"""
     if not GOOGLE_SCRIPT_URL:
-        return
-    try:
-        requests.post(GOOGLE_SCRIPT_URL, json={
-            "action": "update", "id": trade_id,
-            "status": status, "exitPrice": exit_price
-        }, timeout=10)
-    except:
-        pass
+        return True  # مفيش شيت أصلاً، اعتبرها "نجحت" عشان الرسالة تتبعت عادي
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(GOOGLE_SCRIPT_URL, json={
+                "action": "update", "id": trade_id,
+                "status": status, "exitPrice": exit_price
+            }, timeout=10)
+            result = resp.json()
+            if result.get("success"):
+                return True
+        except:
+            pass
+    return False
 
 
 # ---------------------------------------------------------
@@ -253,6 +262,24 @@ def calculate_atr(highs, lows, closes, period=14):
     return atr
 
 
+def calculate_vwap(ohlcv, period=24):
+    """
+    VWAP: متوسط السعر المرجّح بالحجم (آخر 24 شمعة ساعة = يوم تقريبي)
+    بيدّي سياق: هل السعر فوق أو تحت متوسط التداول الحقيقي، مش مجرد متوسط سعري بسيط
+    """
+    recent = ohlcv[-period:] if len(ohlcv) >= period else ohlcv
+    total_pv = 0
+    total_volume = 0
+    for candle in recent:
+        typical_price = (candle[2] + candle[3] + candle[4]) / 3  # (high+low+close)/3
+        volume = candle[5]
+        total_pv += typical_price * volume
+        total_volume += volume
+    if total_volume == 0:
+        return recent[-1][4]  # لو مفيش حجم، رجّع آخر سعر إغلاق
+    return total_pv / total_volume
+
+
 def get_btc_trend():
     try:
         ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=100)
@@ -282,6 +309,7 @@ def analyze_coin(symbol, btc_trend, fg_value, low_liquidity):
     bb_upper, bb_mid, bb_lower = calculate_bollinger(closes)
     adx = calculate_adx(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
+    vwap = calculate_vwap(ohlcv)
 
     volume_strength = "عادي"
     if volume > 5_000_000:
@@ -329,6 +357,12 @@ def analyze_coin(symbol, btc_trend, fg_value, low_liquidity):
     else:
         rejections.append(f"ADX ضعيف ({adx:.0f})")
 
+    if price > vwap:
+        score += 1
+        reasons.append("السعر فوق VWAP")
+    else:
+        rejections.append("السعر تحت VWAP")
+
     if fg_value <= 30:
         score += 1
         reasons.append("مشاعر السوق خائفة (فرصة)")
@@ -354,7 +388,7 @@ def analyze_coin(symbol, btc_trend, fg_value, low_liquidity):
 
     return {
         "symbol": symbol, "price": price, "rsi": rsi, "trend": trend,
-        "adx": adx, "atr": atr, "ema20": ema20, "volume_strength": volume_strength,
+        "adx": adx, "atr": atr, "vwap": vwap, "ema20": ema20, "volume_strength": volume_strength,
         "score": score, "reasons": reasons, "rejections": rejections,
         "tp": tp, "sl": sl
     }
@@ -369,11 +403,17 @@ def check_open_trades():
             ticker = exchange.fetch_ticker(trade["symbol"])
             price = ticker['last']
             if price >= float(trade["tp"]):
-                sheet_update_trade(trade["id"], "WIN", price)
-                send_telegram(f"✅ توصية {trade['symbol']} وصلت لهدف الربح! السعر: ${price:.4f}")
+                updated = sheet_update_trade(trade["id"], "WIN", price)
+                if updated:
+                    send_telegram(f"✅ توصية {trade['symbol']} وصلت لهدف الربح! السعر: ${price:.4f}")
+                else:
+                    print(f"⚠️ فشل تحديث الشيت لـ{trade['symbol']} — هيتحاول تاني الفحص الجاي")
             elif price <= float(trade["sl"]):
-                sheet_update_trade(trade["id"], "LOSS", price)
-                send_telegram(f"❌ توصية {trade['symbol']} وصلت لوقف الخسارة. السعر: ${price:.4f}")
+                updated = sheet_update_trade(trade["id"], "LOSS", price)
+                if updated:
+                    send_telegram(f"❌ توصية {trade['symbol']} وصلت لوقف الخسارة. السعر: ${price:.4f}")
+                else:
+                    print(f"⚠️ فشل تحديث الشيت لـ{trade['symbol']} — هيتحاول تاني الفحص الجاي")
         except Exception as e:
             print(f"خطأ في متابعة {trade['symbol']}: {e}")
 
@@ -477,7 +517,7 @@ for symbol in halal_coins:
 التقييم: {strength} — {r['score']} نقاط
 العملة: {r['symbol']}
 RSI: {r['rsi']:.1f} | الاتجاه: {r['trend']} | ADX: {r['adx']:.1f}
-الحجم: {r['volume_strength']} | مشاعر السوق: {fg_value} ({fg_class})
+VWAP: ${r['vwap']:.4f} | الحجم: {r['volume_strength']} | مشاعر السوق: {fg_value} ({fg_class})
 أسباب الإشارة: {', '.join(r['reasons'])}
 
 {decision}
