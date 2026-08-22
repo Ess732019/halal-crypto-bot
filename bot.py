@@ -77,10 +77,13 @@ def is_in_cooldown(symbol, last_times):
         return False
     try:
         last_time = datetime.fromisoformat(str(last_times[symbol]).replace("Z", "+00:00"))
+        if last_time.tzinfo is None:
+            last_time = last_time.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         hours_passed = (now - last_time).total_seconds() / 3600
         return hours_passed < COOLDOWN_HOURS
-    except:
+    except Exception as e:
+        print(f"   ⚠️ فشل حساب Cooldown لـ{symbol} — القيمة الخام: {last_times.get(symbol)!r} — الخطأ: {e}")
         return False
 
 
