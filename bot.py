@@ -1,6 +1,7 @@
 import ccxt
 import requests
 import os
+import time
 from datetime import datetime, timezone
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -15,13 +16,13 @@ halal_coins = [
 # تحسين 21: مصدر احتياطي — لو Kraken وقعت أو فيها مشكلة، نستخدم KuCoin بدل منها
 def get_exchange():
     try:
-        ex = ccxt.kraken()
+        ex = ccxt.kraken({'enableRateLimit': True})
         ex.fetch_ticker('BTC/USDT')  # اختبار سريع إن المنصة شغالة فعلاً
         print("متصل بـ: Kraken")
         return ex
     except Exception as e:
         print(f"⚠️ Kraken مش متاحة ({e}) — التحويل لـ KuCoin")
-        ex = ccxt.kucoin()
+        ex = ccxt.kucoin({'enableRateLimit': True})
         print("متصل بـ: KuCoin")
         return ex
 
@@ -280,6 +281,28 @@ def calculate_vwap(ohlcv, period=24):
     return total_pv / total_volume
 
 
+def calculate_volume_spike(ohlcv, period=20):
+    """
+    Volume Spike: بيقارن حجم آخر شمعة بمتوسط حجم كل عملة مع نفسها (مش رقم ثابت)
+    ده أعدل من المقياس الثابت لأنه بياخد في الاعتبار إن كل عملة حجمها الطبيعي مختلف
+    بيرجع (تصنيف نصي, نسبة الزيادة)
+    """
+    if len(ohlcv) < period + 1:
+        return "عادي", 1.0
+    volumes = [c[5] for c in ohlcv]
+    current_volume = volumes[-1]
+    avg_volume = sum(volumes[-(period + 1):-1]) / period  # متوسط الشموع السابقة (من غير الحالية)
+    if avg_volume == 0:
+        return "عادي", 1.0
+    ratio = current_volume / avg_volume
+    if ratio >= 2.0:
+        return "قوي جداً", ratio
+    elif ratio >= 1.3:
+        return "قوي", ratio
+    else:
+        return "عادي", ratio
+
+
 def get_btc_trend():
     try:
         ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=100)
@@ -289,13 +312,28 @@ def get_btc_trend():
         return "غير محدد"
 
 
+def get_higher_timeframe_trend(symbol):
+    """
+    تحسين 22: تأكيد الإطار الزمني الأكبر (4 ساعات)
+    بيمنع الدخول في ارتدادات قصيرة المدى (فريم الساعة) لو الاتجاه الأكبر معاكس
+    بيرجع "صاعد" أو "هابط" أو "غير محدد" (لو فشل الجلب، عشان الفلتر ما يوقفش البوت كله)
+    """
+    time.sleep(0.5)  # تأخير بسيط إضافي لتقليل ضغط الطلبات على المنصة
+    try:
+        ohlcv_4h = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
+        closes_4h = [c[4] for c in ohlcv_4h]
+        return "صاعد" if calculate_ema(closes_4h, 20) > calculate_ema(closes_4h, 50) else "هابط"
+    except Exception as e:
+        print(f"   ⚠️ فشل جلب فريم الـ4 ساعات لـ{symbol}: {e}")
+        return "غير محدد"
+
+
 # ---------------------------------------------------------
 # التحليل الكامل لكل عملة — تحسين 14: نظام نقاط موحّد
 # ---------------------------------------------------------
 def analyze_coin(symbol, btc_trend, fg_value, low_liquidity):
     ticker = exchange.fetch_ticker(symbol)
     price = ticker['last']
-    volume = ticker.get('quoteVolume', 0)
 
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
     closes = [c[4] for c in ohlcv]
@@ -310,12 +348,7 @@ def analyze_coin(symbol, btc_trend, fg_value, low_liquidity):
     adx = calculate_adx(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     vwap = calculate_vwap(ohlcv)
-
-    volume_strength = "عادي"
-    if volume > 5_000_000:
-        volume_strength = "قوي جداً"
-    elif volume > 1_000_000:
-        volume_strength = "قوي"
+    volume_strength, volume_ratio = calculate_volume_spike(ohlcv)
 
     trend = "صاعد" if ema20 > ema50 else "هابط"
 
@@ -388,7 +421,8 @@ def analyze_coin(symbol, btc_trend, fg_value, low_liquidity):
 
     return {
         "symbol": symbol, "price": price, "rsi": rsi, "trend": trend,
-        "adx": adx, "atr": atr, "vwap": vwap, "ema20": ema20, "volume_strength": volume_strength,
+        "adx": adx, "atr": atr, "vwap": vwap, "ema20": ema20,
+        "volume_strength": volume_strength, "volume_ratio": volume_ratio,
         "score": score, "reasons": reasons, "rejections": rejections,
         "tp": tp, "sl": sl
     }
@@ -479,6 +513,28 @@ for symbol in halal_coins:
                 send_telegram(watch_msg)
             continue
 
+        # تحسين 22: تأكيد الإطار الزمني الأكبر (4 ساعات) — منع ارتدادات قصيرة عكس الاتجاه الأكبر
+        higher_tf_trend = get_higher_timeframe_trend(symbol)
+        if higher_tf_trend == "هابط":
+            if r["score"] >= 3:
+                mtf_watch_msg = f"""🟠 ترقب — {r['symbol']} (تعارض بين الأطر الزمنية)
+
+السعر الحالي: ${r['price']:.4f}
+اتجاه الساعة: صاعد ✅ | اتجاه الـ4 ساعات: هابط ⚠️
+
+فيه إشارات إيجابية على المدى القصير: {', '.join(r['reasons'])}
+لكن الاتجاه الأكبر (4 ساعات) لسه هابط، وده بيزود احتمال إن ده مجرد ارتداد مؤقت هيرجع ينزل
+
+راقب اتجاه الـ4 ساعات في الفحوصات الجاية — لو اتحول لصاعد، الفرصة تبقى أوثق بكتير
+
+⚠️ رسالة ترقب فقط، مش توصية تنفيذ."""
+                send_telegram(mtf_watch_msg)
+            continue
+        elif higher_tf_trend == "صاعد":
+            r["score"] += 1
+            r["reasons"].append("اتجاه الـ4 ساعات صاعد (توافق الأطر الزمنية)")
+        # لو "غير محدد" (فشل الجلب)، البوت يكمل عادي من غير ما يوقف أو يمنع — أمان إضافي
+
         # فلتر قوة الاتجاه (ADX ضعيف) — رسالة ترقب مفصّلة بدل التوصية المباشرة
         if r["adx"] < 18 and r["score"] >= 3:
             adx_watch_msg = f"""⏳ ترقب — {r['symbol']}
@@ -517,7 +573,7 @@ for symbol in halal_coins:
 التقييم: {strength} — {r['score']} نقاط
 العملة: {r['symbol']}
 RSI: {r['rsi']:.1f} | الاتجاه: {r['trend']} | ADX: {r['adx']:.1f}
-VWAP: ${r['vwap']:.4f} | الحجم: {r['volume_strength']} | مشاعر السوق: {fg_value} ({fg_class})
+VWAP: ${r['vwap']:.4f} | الحجم: {r['volume_strength']} ({r['volume_ratio']:.1f}x المتوسط) | مشاعر السوق: {fg_value} ({fg_class})
 أسباب الإشارة: {', '.join(r['reasons'])}
 
 {decision}
